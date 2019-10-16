@@ -19,7 +19,7 @@ def total_correlation(dist, rvs=None, crvs=None, rv_mode=None):
     or the integration.
 
     Parameters
-    ----------
+    -------
     dist : Distribution
         The distribution from which the total correlation is calculated.
     rvs : list, None

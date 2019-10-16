@@ -31,8 +31,7 @@ from .variational_distance import (
 
 def jensen_shannon_divergence2(p, q):
     """
-    Compute the Jensen-Shannon divergence between two pmfs.
-
+    Compute the Jensen-Shannon divergence between two pmfs. 
     Parameters
     ----------
     p : np.ndarray

@@ -10,6 +10,8 @@ from ..algorithms import BaseAuxVarOptimizer
 from ..divergences.pmf import relative_entropy
 from ..exceptions import ditException
 
+import pysnooper
+
 class InformationBottleneck(BaseAuxVarOptimizer):
     """
     Base optimizer for information bottleneck type calculations.
@@ -44,8 +46,9 @@ class InformationBottleneck(BaseAuxVarOptimizer):
             variable names. If `None`, then the value of `dist._rv_mode` is
             consulted, which defaults to 'indices'.
         """
-        if rvs is None:
-            rvs = dist.rvs
+        with pysnooper.snoop():
+            if rvs is None:
+                rvs = dist.rvs
 
         if len(rvs) != 2:
             msg = "The information bottleneck is only defined for two variables."
@@ -177,12 +180,13 @@ class InformationBottleneck(BaseAuxVarOptimizer):
             obj = self.entropy(pmf) + self._beta * self.distortion(pmf)
             return obj
 
-        if np.isclose(self._alpha, 1.0):
-            return ib_objective
-        elif np.isclose(self._alpha, 0.0):
-            return dib_objective
-        else:
-            return gib_objective
+        with pysnooper.snoop():
+            if np.isclose(self._alpha, 1.0):
+                return ib_objective
+            elif np.isclose(self._alpha, 0.0):
+                return dib_objective
+            else:
+                return gib_objective
 
     @classmethod
     def functional(cls):

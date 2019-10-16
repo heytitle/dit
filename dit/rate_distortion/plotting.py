@@ -240,5 +240,84 @@ class IBPlotter(BasePlotter):
         self._plot(axs[0, 1], self._complexity_axis, self._relevance_axis, downsample)
         self._plot(axs[1, 1], self._error_axis, self._complexity_axis, downsample)
         self._plot(axs[2, 1], self._distortion_axis, self._complexity_axis, downsample)
+        plt.tight_layout()
+
+        return fig
+
+class IBPlotterHack(BasePlotter):
+    """
+    A plotter for information bottleneck curves.
+    """
+    _complexity_axis = Axis(attrgetter('complexities'), attrgetter('_max_complexity'), "$I[X:\hat{X}]$")
+    _entropy_axis = Axis(attrgetter('entropies'), attrgetter('_max_complexity'), r"$H[\hat{X}]$")
+    _relevance_axis = Axis(attrgetter('relevances'), attrgetter('_max_relevance'), r"$I[Y:\hat{X}]$")
+    _error_axis = Axis(attrgetter('errors'), attrgetter('_max_relevance'), r"$I[X:Y|\hat{X}]$")
+
+    # Pat's hack
+    _ixy_p0_axis = Axis(attrgetter('ixy_pi0'), attrgetter('_max_relevance'), r"$I[X:Y] - I^\pi_Y ( X \searrow \hat X )$")
+    _p0_axis = Axis(attrgetter('pi0'), attrgetter('_max_relevance'), r"$I^\pi_Y ( X \searrow \hat X ), aka. \pi_0$")
+    _p1_axis = Axis(attrgetter('pi1'), attrgetter('_max_relevance'), r"$I^\pi_Y ( \hat X \searrow X), aka. \pi_1$")
+    _ixy_p1_axis = Axis(attrgetter('ixy_pi1'), attrgetter('_max_relevance'), r"$I[X:Y] - I^\pi_Y ( \hat X \searrow X )$")
+
+    _curve_type = IBCurve
+
+    def _plot(self, ax, axis_1, axis_2, downsample):
+        """
+        Plot various views of the information bottleneck curv
+        Parameters
+        ----------
+        downsample : int
+            Show markers every `downsample` points.
+        """
+        ax = super(IBPlotterHack, self)._plot(ax, axis_1, axis_2, downsample)
+
+        if axis_1 is self._beta_axis:
+            for curve in self.curves:
+                for kink in curve.find_kinks():
+                    ax.axvline(kink, ls=':', c='k')
+
+        return ax
+
+    def plot(self, downsample=5):
+        """
+        Plot various views of the information bottleneck curve.
+
+        Parameters
+        ----------
+        downsample : int
+            Show markers every `downsample` points.
+        """
+        fig, axs = plt.subplots(5, 2, figsize=(16, 25))
+
+        self._plot(axs[0, 0], self._beta_axis, self._complexity_axis, downsample)
+        axs[0, 0].legend(loc='best')
+        self._plot(axs[0, 1], self._complexity_axis, self._relevance_axis, downsample)
+
+        self._plot(axs[1, 0], self._beta_axis, self._relevance_axis, downsample)
+        self._plot(axs[1, 1], self._error_axis, self._complexity_axis, downsample)
+
+        # Pat's hack
+        self._plot(axs[2, 0], self._beta_axis, self._p0_axis, downsample)
+        self._plot(axs[2, 1], self._ixy_p0_axis, self._complexity_axis, downsample)
+
+        curve = self.curves[0]
+        axs[3, 1].plot(
+            self._error_axis.data(curve),
+            self._complexity_axis.data(curve),
+            'o-',
+            label=self._error_axis.label
+        )
+        axs[3, 1].plot(
+            self._ixy_p0_axis.data(curve),
+            self._complexity_axis.data(curve),
+            'x-',
+            label=self._ixy_p0_axis.label
+        )
+        axs[3, 1].set_ylabel(self._complexity_axis.label)
+        axs[3, 1].legend()
+        # end Pat's hack
+
+        self._plot(axs[4, 1], self._distortion_axis, self._complexity_axis, downsample)
+        self._plot(axs[4, 0], self._beta_axis, self._rank_axis, downsample)
 
         return fig

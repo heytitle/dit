@@ -148,7 +148,10 @@ def min_dkl(dist, domain):
 
 def projected_information(dist, X, Y, Z):
     """
-    I_Z^pi(X \searrow Y)
+    Pat's comment: I_Z^pi(X \searrow Y)
+
+    X, Y : observable
+    Z : unobservable
 
     Paramters
     ---------

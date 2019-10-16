@@ -13,8 +13,12 @@ from .. import Distribution
 from ..algorithms.minimal_sufficient_statistic import mss
 from ..exceptions import ditException
 from ..multivariate import entropy, total_correlation
+from ..shannon import mutual_information
 from ..utils import flatten
 
+from ..pid import iproj
+
+import pysnooper
 
 class RDCurve(object):
     """
@@ -520,4 +524,287 @@ class IBCurve(object):
         """
         from .plotting import IBPlotter
         plotter = IBPlotter(self)
+        return plotter.plot(downsample)
+
+class IBCurveHack(object):
+    """
+    Compute an information bottleneck curve.
+    """
+
+    def __init__(self, dist, rvs=None, crvs=None, rv_mode=None, beta_min=0.0, beta_max=15.0, beta_num=101, alpha=1.0, method='sp', divergence=None):
+        """
+        Initialize the curve computer.
+
+        Parameters
+        ----------
+        dist : Distribution
+            The distribution of interest.
+        rv : iterable, None
+            The random variables to compute the information bottleneck curve of.
+            If None, use [0], [1].
+        crvs : iterable, None
+            The random variables to condition on.
+        rv_mode : str, None
+            Specifies how to interpret `rvs` and `crvs`. Valid options are:
+            {'indices', 'names'}. If equal to 'indices', then the elements of
+            `crvs` and `rvs` are interpreted as random variable indices. If
+            equal to 'names', the the elements are interpreted as random
+            variable names. If `None`, then the value of `dist._rv_mode` is
+            consulted, which defaults to 'indices'.
+        beta_min : float
+            The minimum beta value for the curve. Defaults to 0.
+        beta_max : float, None
+            The maximum beta value for the curve. Defaults to 15. If None,
+            iteratively find a beta value with nearly maximal complexity.
+        beta_num : int
+            The number of beta values for the curve. Defaults to 101.
+        alpha : float
+            The alpha value to utilize. 1.0 corresponds to the standard information
+            bottleneck, while 0.0 corresponds to the deterministic bottleneck.
+        method : {'sp', 'ba'}
+            The method to utilize in computing the curve. If 'sp', utilize
+            scipy.optimize; if 'ba' utilize the iterative Blahut-Arimoto
+            algorithm. Defaults to 'sp'.
+        divergence : func
+            The divergence measure to use as a distortion. Defaults to the standard
+            relative entropy.
+        """
+        self.dist = dist.copy()
+        self.dist.make_dense()
+
+        self._x, self._y = rvs if rvs is not None else ([0], [1])
+        self._z = crvs if crvs is not None else []
+        self._aux = [dist.outcome_length()]
+        self._rv_mode = rv_mode
+
+        self.p_xy = self.dist.coalesce([self._x, self._y])
+        self.p_xy = self.p_xy.pmf.reshape(tuple(map(len, self.p_xy.alphabet)))
+
+        args = {'dist': self.dist,
+                'beta': 0.0,
+                'alpha': alpha,
+                'rvs': [self._x, self._y],
+                'crvs': self._z,
+                'rv_mode': self._rv_mode
+        }
+
+        if divergence is not None:  # pragma: no cover
+            bottleneck = InformationBottleneckDivergence
+            args['divergence'] = divergence
+        else:
+            bottleneck = InformationBottleneck
+        self._bn = bottleneck(**args)
+
+        self._max_complexity = entropy(mss(dist, self._x, self._y))
+        self._max_relevance = total_correlation(dist, [self._x, self._y])
+        self._max_rank = len(dist.marginal(self._x).outcomes)
+        self._max_distortion = self._bn.distortion(self._get_opt_sp(beta=0.0)[0])
+
+        with pysnooper.snoop():
+            if np.isclose(alpha, 1.0):
+                self.label = "IB"
+            elif np.isclose(alpha, 0.0):
+                self.label = "DIB"
+            else:
+                self.label = "GIB({:.3f})".format(alpha)
+
+        beta_max = self.find_max_beta() if beta_max is None else beta_max
+        self.betas = np.linspace(beta_min, beta_max, beta_num)
+
+        self.compute(method)
+
+    def __add__(self, other):  # pragma: no cover
+        """
+        Combine two IBCurves into an IBPlotter.
+
+        Parameters
+        ----------
+        other : IBCurve
+            The curve to aggregate with `self`.
+
+        Returns
+        -------
+        plotter : IBPlotter
+            A plotter with both `self` and `other`.
+        """
+        from .plotting import IBPlotter
+        if isinstance(other, IBCurve):
+            plotter = IBPlotter(self, other)
+            return plotter
+        else:
+            return NotImplemented
+
+    def _get_opt_sp(self, beta, initial=None):
+        """
+        Compute the information bottleneck solution for `beta` using scipy.optimize.
+
+        Parameters
+        ----------
+        beta : float
+            The beta value to optimize for.
+        initial : np.ndarray, None
+            An initial optimization vector, useful for numerical continuation.
+
+        Returns
+        -------
+        q : np.ndarray
+            The matrix p(x, y, z, t)
+        x0 : np.ndarray
+            The found optima.
+        """
+        self._bn._beta = beta
+        self._bn.optimize(x0=initial)
+        x0 = self._bn._optima.copy()
+        q_xyzt = self._bn.construct_joint(self._bn._optima)
+        return q_xyzt, x0
+
+    def _get_opt_ba(self, beta, initial=None):  # pragma: no cover
+        """
+        Compute the information bottleneck solution for `beta` using blahut-arimoto.
+
+        Parameters
+        ----------
+        beta : float
+            The beta value to optimize for.
+        initial : np.ndarray, None
+            An initial optimization vector, useful for numerical continuation.
+
+        Returns
+        -------
+        q : np.ndarray
+            The matrix p(x, y, z, t)
+        x0 : np.ndarray
+            The found optima.
+        """
+        q_xyt = blahut_arimoto_ib(p_xy=self.p_xy, beta=beta)[1]
+        q_xyzt = q_xyt[:, :, np.newaxis, :]
+        return q_xyzt, None
+
+    def compute(self, method='sp'):
+        """
+        Sweep beta and compute the information bottleneck curve.
+
+        Parameters
+        ----------
+        method : {'sp', 'ba'}
+            The method of computation to use. 'sp' denotes scipy.optimize;
+            'ba' denotes blahut-arimoto.
+        """
+        get_opt = {'ba': self._get_opt_ba,
+                   'sp': self._get_opt_sp,
+                   }[method]
+
+        complexities = []
+        entropies = []
+        relevances = []
+        errors = []
+        ranks = []
+        alphabets = []
+        distortions = []
+
+        x, y, z, t = [[0], [1], [2], [3]]
+
+        x0 = None
+
+        # pat's hack
+        ixy_pi0 = []
+        pi_0, pi_1 = [], []
+        ixy = []
+        ixhat_y = []
+
+        for beta in self.betas[::-1]:
+            q_xyzt, x0 = get_opt(beta, x0)
+            d = Distribution.from_ndarray(q_xyzt)
+            complexities.append(total_correlation(d, [x, t], z))
+            entropies.append(entropy(d, x, z))
+            relevances.append(total_correlation(d, [y, t], z))
+            errors.append(total_correlation(d, [x, y], z + t))
+            distortions.append(self._bn.distortion(q_xyzt))
+
+            q_xt = q_xyzt.sum(axis=(1, 2))
+            q_x_t = (q_xt / q_xt.sum(axis=0, keepdims=True))
+            q_x_t[np.isnan(q_x_t)] = 0
+
+            ranks.append(np.linalg.matrix_rank(q_x_t, tol=1e-4))
+            alphabets.append((q_xt.sum(axis=0) > 1e-6).sum())
+
+            #  t = X_hat 
+            _pi_0 = iproj.projected_information(d, x, t, y)
+            _pi_1 = iproj.projected_information(d, t, x, y)
+
+            _ixy = mutual_information(d, x, y)
+            ixy.append(_ixy)
+            ixhat_y.append(mutual_information(d, t, y))
+
+            pi_0.append(_pi_0)
+            pi_1.append(_pi_1)
+
+        self.complexities = np.asarray(complexities)[::-1]
+        self.entropies = np.asarray(entropies)[::-1]
+        self.relevances = np.asarray(relevances)[::-1]
+        self.errors = np.asarray(errors)[::-1]
+        self.ranks = np.asarray(ranks)[::-1]
+        self.alphabets = np.asarray(alphabets)[::-1]
+        self.distortions = np.asarray(distortions)[::-1]
+
+        # pat's hack
+        self.pi0 = np.asarray(pi_0)[::-1]
+        self.pi1 = np.asarray(pi_1)[::-1]
+        self.ixy_pi0 = np.asarray(ixy)[::-1] - self.pi0
+        self.ixy_pi1 = np.asarray(ixhat_y)[::-1] - self.pi1
+
+        assert np.isclose(np.std(ixy), 0)
+
+    def find_max_beta(self):
+        """
+        Find a beta value which maximizes the rate.
+
+        Returns
+        -------
+        beta_max : float
+            The the smallest found beta value which achieves minimal
+            distortion.
+        """
+        beta_max = 1.0
+        relevance = 0.0
+
+        while not np.isclose(relevance, self._max_relevance, atol=1e-5, rtol=1e-5):
+            beta_max = 1.5*beta_max
+            q, _ = self._get_opt_sp(beta=beta_max)
+            relevance = self._bn.relevance(q)
+
+        return beta_max
+
+    def find_kinks(self):
+        """
+        Determine the beta values where new features are discovered.
+
+        Returns
+        -------
+        kinks : np.ndarray
+            An array of beta values where new features are discovered.
+        """
+        diff = np.diff(self.ranks)
+        jumps = np.arange(len(diff))[diff > 0]
+        kinks = np.asarray([jump for jump in jumps if diff[jump-1] == 0])
+        return self.betas[kinks]
+
+    def plot(self, downsample=5):  # pragma: no cover
+        """
+        Construct an IBPlotter and utilize it to plot the information
+        bottleneck curve.
+
+        Parameters
+        ----------
+        downsample : int
+            The how frequent to display points along the IB curve.
+
+        Returns
+        -------
+        fig : plt.figure
+            The resulting figure.
+        """
+        from .plotting import IBPlotterHack
+        plotter = IBPlotterHack(self)
+
         return plotter.plot(downsample)
